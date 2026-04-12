@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Environment / secrets
+.env
+.env.local
+.env*.local
+
+# Database
+backend/data/jobs.db
+
+# Node
+node_modules/
+.next/
+.DS_Store
+
+# Build / temp
+/tmp/
+dist/
+build/

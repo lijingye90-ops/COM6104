@@ -1,0 +1,38 @@
+[
+  {
+    "job_id": "cached-001",
+    "title": "Senior Python Engineer",
+    "company": "Acme Tech",
+    "url": "https://example.com/jobs/001",
+    "description": "We are looking for a Senior Python Engineer to join our backend team. You will design and implement scalable microservices, work with FastAPI and PostgreSQL, and mentor junior engineers. 3+ years Python experience required.",
+    "location": "Remote",
+    "source": "cached",
+    "posted_at": "2026-03-15T00:00:00Z",
+    "match_score": 0,
+    "match_reason": "缓存预置数据，未计算匹配分"
+  },
+  {
+    "job_id": "cached-002",
+    "title": "Backend Engineer (Python / FastAPI)",
+    "company": "Startup XYZ",
+    "url": "https://example.com/jobs/002",
+    "description": "Join our small team building developer tools. Stack: Python, FastAPI, Redis, Docker. You'll own features end-to-end and work directly with the CTO. Remote-first culture.",
+    "location": "Remote (US)",
+    "source": "cached",
+    "posted_at": "2026-03-20T00:00:00Z",
+    "match_score": 0,
+    "match_reason": "缓存预置数据，未计算匹配分"
+  },
+  {
+    "job_id": "cached-003",
+    "title": "Full Stack Python Developer",
+    "company": "DataCo",
+    "url": "https://example.com/jobs/003",
+    "description": "Building data pipelines and internal tooling. Python + React. Experience with Pandas, SQLAlchemy, and REST API design. Nice to have: experience with AI/ML tooling.",
+    "location": "Remote",
+    "source": "cached",
+    "posted_at": "2026-03-18T00:00:00Z",
+    "match_score": 0,
+    "match_reason": "缓存预置数据，未计算匹配分"
+  }
+]
