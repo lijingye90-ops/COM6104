@@ -8,9 +8,8 @@ load_dotenv()
 _ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4"
 _ZHIPU_API_KEY = os.getenv("ZHIPUAI_API_KEY", "")
 
-import tempfile
 STORAGE_STATE_PATH = Path(__file__).parent.parent / "data" / "linkedin_state.json"
-TMP_DIR = Path(tempfile.gettempdir())
+TMP_DIR = Path("/tmp")
 
 
 def _md_to_pdf(md_path: str, output_path: str) -> bool:

@@ -105,21 +105,10 @@ TOOLS = [
 
 # ── Agent loop (async generator yielding SSE events) ─────────────────────────
 
-async def run_agent(
-    user_message: str,
-    resume_path: str | None = None,
-    history: list | None = None,
-):
+async def run_agent(user_message: str, resume_path: str | None = None):
     """
     Run the job hunt agent as an async generator.
     Yields dicts with SSE event structure: {"event": ..., "data": {...}}
-
-    Args:
-        user_message: The current user input.
-        resume_path:  Optional path to uploaded PDF resume.
-        history:      Prior conversation turns (excludes system message).
-                      Pass the value returned by a previous "session_update" event
-                      to maintain short-term memory across multiple chat calls.
     """
     # ── Extract resume text for system prompt injection ───────────────────
     resume_summary = "（用户尚未上传简历）"
@@ -133,23 +122,15 @@ async def run_agent(
 
     system_content = SYSTEM_PROMPT.format(resume_summary=resume_summary)
 
-    # ── Build messages: system + previous history + new user turn ────────
+    # ── Build initial messages ────────────────────────────────────────────
     content = user_message
     if resume_path:
         content += f"\n\n[简历文件路径: {resume_path}]"
 
-    if history:
-        # Prepend updated system prompt, then replay prior turns
-        messages = [
-            {"role": "system", "content": system_content},
-            *history,
-            {"role": "user", "content": content},
-        ]
-    else:
-        messages = [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": content},
-        ]
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": content},
+    ]
 
     last_tool_result = None
 
@@ -170,11 +151,6 @@ async def run_agent(
 
         # ── No tool calls → final answer or reasoning ────────────────────
         if not message.tool_calls:
-            # Append assistant reply to messages so history is complete
-            messages.append({"role": "assistant", "content": message.content or ""})
-            # Yield session snapshot (excludes system message at index 0)
-            yield {"event": "session_update", "data": {"history": messages[1:]}}
-
             if last_tool_result is not None:
                 # Tools were used previously, this is the final answer
                 yield {
@@ -229,7 +205,6 @@ async def run_agent(
             })
     else:
         # Loop exhausted 20 iterations — yield partial results
-        yield {"event": "session_update", "data": {"history": messages[1:]}}
         yield {
             "event": "done",
             "data": {
