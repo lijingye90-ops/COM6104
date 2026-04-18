@@ -2,9 +2,7 @@
 import asyncio
 import os
 import tempfile
-import uuid
 from pathlib import Path
-from collections import OrderedDict
 
 import json
 
@@ -17,12 +15,6 @@ from agent import run_agent
 from db import init_db, seed_db, track_application, list_applications
 
 app = FastAPI(title="Job Hunt Agent API")
-
-# ── Short-term memory: session store ────────────────────────────────────────
-# Stores conversation history per session_id (excludes system message).
-# Capped at 100 sessions (oldest evicted first) to avoid unbounded memory use.
-_MAX_SESSIONS = 100
-SESSIONS: OrderedDict[str, list] = OrderedDict()
 
 app.add_middleware(
     CORSMiddleware,
@@ -51,7 +43,6 @@ def health():
 class ChatRequest(BaseModel):
     message: str
     resume_path: str | None = None
-    session_id: str | None = None  # pass this back on subsequent turns
 
 
 @app.post("/api/chat")
@@ -59,30 +50,9 @@ async def chat(req: ChatRequest):
     """
     Main agent endpoint. Accepts a natural language message.
     Returns SSE stream of agent events.
-
-    Short-term memory: include session_id from a previous response to continue
-    a conversation. A new session_id is created and sent back as a
-    'session_id' SSE event on the first call.
     """
-    # Resolve or create session
-    sid = req.session_id if req.session_id and req.session_id in SESSIONS else str(uuid.uuid4())
-    history = SESSIONS.get(sid, [])
-
     async def event_stream():
-        # Send session_id first so the frontend can persist it
-        yield f"event: session_id\ndata: {json.dumps({'session_id': sid})}\n\n"
-
-        async for event in run_agent(req.message, req.resume_path, history=history):
-            if event.get("event") == "session_update":
-                # Update in-memory session store
-                new_history = event["data"]["history"]
-                SESSIONS[sid] = new_history
-                SESSIONS.move_to_end(sid)
-                # Evict oldest session if over cap
-                if len(SESSIONS) > _MAX_SESSIONS:
-                    SESSIONS.popitem(last=False)
-                continue  # don't forward this internal event to the client
-
+        async for event in run_agent(req.message, req.resume_path):
             event_type = event.get("event", "message")
             data = json.dumps(event.get("data", {}), ensure_ascii=False)
             yield f"event: {event_type}\ndata: {data}\n\n"
@@ -92,13 +62,6 @@ async def chat(req: ChatRequest):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
-
-
-@app.delete("/api/session/{session_id}")
-def clear_session(session_id: str):
-    """Clear a specific session's conversation history."""
-    SESSIONS.pop(session_id, None)
-    return {"status": "cleared"}
 
 
 # ── Resume upload ─────────────────────────────────────────────────────────
@@ -112,7 +75,7 @@ async def upload_resume(file: UploadFile = File(...)):
     if not file.filename.endswith(".pdf"):
         raise HTTPException(400, "只支持 PDF 格式")
 
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir="/tmp")
     content = await file.read()
     tmp.write(content)
     tmp.close()

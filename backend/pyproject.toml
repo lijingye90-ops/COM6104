@@ -14,12 +14,7 @@ dependencies = [
     "requests>=2.32",
     "mistune>=3.0",
     "weasyprint>=62",
-    "mcp>=1.0",
-    "playwright>=1.40",
 ]
-
-[tool.uv]
-package = false
 
 [build-system]
 requires = ["hatchling"]

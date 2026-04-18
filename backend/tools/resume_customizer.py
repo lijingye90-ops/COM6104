@@ -7,9 +7,8 @@ from zhipuai import ZhipuAI
 from dotenv import load_dotenv
 import pdfplumber
 
-import tempfile
 load_dotenv()
-TMP_DIR = Path(tempfile.gettempdir())
+TMP_DIR = Path("/tmp")
 client = ZhipuAI(api_key=os.getenv("ZHIPUAI_API_KEY"))
 
 
