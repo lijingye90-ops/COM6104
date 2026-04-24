@@ -29,12 +29,39 @@ import {
   Activity,
   CheckCheck,
   RotateCcw,
+  Download,
 } from "lucide-react"
 import { getDefaultResumePath } from "@/lib/resume-store"
 
+// --- File download helpers ---
+
+const BACKEND_URL = "http://localhost:8000"
+// Match absolute file paths with common artifact extensions
+const FILE_PATH_REGEX = /(\/(?:tmp|var\/folders(?:\/[^/\s]+){3}|[\w.-]+(?:\/[\w.-]+){1,6})\/[\w.-]+\.(?:md|pdf|docx|txt|json|html|csv))/g
+
+function FileDownloadChips({ text }: { text: string }) {
+  const paths = [...new Set([...text.matchAll(FILE_PATH_REGEX)].map((m) => m[1]))]
+  if (paths.length === 0) return null
+  return (
+    <div className="flex flex-wrap gap-2 mb-2">
+      {paths.map((p) => (
+        <a
+          key={p}
+          href={`${BACKEND_URL}/api/files/download?path=${encodeURIComponent(p)}`}
+          download
+          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-blue-50 border border-blue-200 text-blue-700 text-xs font-medium hover:bg-blue-100 transition-colors"
+        >
+          <Download className="size-3.5" />
+          {p.split("/").pop()}
+        </a>
+      ))}
+    </div>
+  )
+}
+
 // --- Types ---
 
-type SSEEventType = "plan" | "tool_start" | "tool_progress" | "tool_result" | "reasoning" | "decision" | "done" | "error" | "memory" | "workflow"
+type SSEEventType = "plan" | "tool_start" | "tool_progress" | "tool_result" | "reasoning" | "decision" | "done" | "error" | "memory" | "workflow" | "await_confirm"
 
 type Message = {
   id: string
@@ -154,6 +181,7 @@ function ToolProgressMessage({ data }: { data: any }) {
 function ToolResultMessage({ data }: { data: any }) {
   const tool = data?.tool || "工具"
   const result = data?.result || data?.output || JSON.stringify(data, null, 2)
+  const resultText = typeof result === "string" ? result : JSON.stringify(result, null, 2)
   return (
     <Collapsible>
       <Card className="border-muted bg-muted/30">
@@ -168,8 +196,9 @@ function ToolResultMessage({ data }: { data: any }) {
         </CollapsibleTrigger>
         <CollapsibleContent>
           <CardContent className="px-4 pb-3 pt-0">
+            <FileDownloadChips text={resultText} />
             <pre className="text-xs bg-background rounded-md p-3 overflow-x-auto whitespace-pre-wrap border">
-              {typeof result === "string" ? result : JSON.stringify(result, null, 2)}
+              {resultText}
             </pre>
           </CardContent>
         </CollapsibleContent>
@@ -188,43 +217,12 @@ function ReasoningMessage({ content }: { content: string }) {
 
 function DoneMessage({ data }: { data: any }) {
   const summary = data?.summary || data?.message || "任务完成"
-  const details = data?.details || {}
-  const lastToolResult = data?.last_tool_result
+  // last_tool_result is raw internal data — shown only in the right-side activity panel, not here
   return (
-    <Card className="border-emerald-200 bg-emerald-50/60">
-      <CardHeader className="pb-2 pt-3 px-4">
-        <CardTitle className="text-sm font-semibold flex items-center gap-2 text-emerald-700">
-          <Sparkles className="size-4" />
-          任务完成
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="px-4 pb-3 space-y-2">
-        <p className="text-sm text-emerald-900">{summary}</p>
-        {lastToolResult && (
-          <div className="rounded-lg border border-emerald-200 bg-white/80 p-3 space-y-1.5">
-            <div className="text-xs font-medium text-emerald-700">最后一个可用结果</div>
-            <div className="text-sm text-emerald-900">
-              <strong>{lastToolResult.tool}</strong>
-            </div>
-            <pre className="text-xs bg-background rounded-md p-2 overflow-x-auto whitespace-pre-wrap border">
-              {typeof lastToolResult.result === "string"
-                ? lastToolResult.result
-                : JSON.stringify(lastToolResult.result, null, 2)}
-            </pre>
-          </div>
-        )}
-        {Object.keys(details).length > 0 && (
-          <div className="space-y-1">
-            {Object.entries(details).map(([key, value]) => (
-              <div key={key} className="flex items-center justify-between text-xs">
-                <span className="text-emerald-700">{key}</span>
-                <span className="font-medium text-emerald-900">{String(value)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </CardContent>
-    </Card>
+    <div className="text-sm leading-relaxed whitespace-pre-wrap text-foreground">
+      <FileDownloadChips text={summary} />
+      {summary}
+    </div>
   )
 }
 
@@ -300,9 +298,25 @@ function WorkflowSnapshot({ workflowState }: { workflowState: WorkflowState | nu
       {workflowState.artifact_paths?.resume_file_path && (
         <div className="flex items-center justify-between gap-2">
           <span className="text-muted-foreground">定制简历</span>
-          <span className="font-medium text-right break-all">
-            {workflowState.artifact_paths.resume_file_path}
-          </span>
+          <a
+            href={`http://localhost:8000/api/files/download?path=${encodeURIComponent(workflowState.artifact_paths.resume_file_path)}`}
+            download
+            className="font-medium text-blue-600 hover:underline text-right text-sm"
+          >
+            下载简历
+          </a>
+        </div>
+      )}
+      {workflowState.artifact_paths?.cover_letter_path && (
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground">求职信</span>
+          <a
+            href={`http://localhost:8000/api/files/download?path=${encodeURIComponent(workflowState.artifact_paths.cover_letter_path)}`}
+            download
+            className="font-medium text-blue-600 hover:underline text-right text-sm"
+          >
+            下载求职信
+          </a>
         </div>
       )}
       {workflowState.apply_result?.status && (
@@ -379,6 +393,42 @@ function MessageBubble({ message }: { message: Message }) {
           {renderContent()}
         </div>
       </div>
+    </div>
+  )
+}
+
+// --- Confirm modal ---
+
+function ConfirmModal({
+  question,
+  onConfirm,
+  onDeny,
+}: {
+  question: string
+  onConfirm: () => void
+  onDeny: () => void
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+      <Card className="w-full max-w-md mx-4 shadow-2xl border-amber-200">
+        <CardHeader className="pb-3 pt-4 px-5">
+          <CardTitle className="text-base font-semibold flex items-center gap-2 text-amber-700">
+            <AlertCircle className="size-5" />
+            Agent 需要确认
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="px-5 pb-5 space-y-4">
+          <p className="text-sm text-foreground leading-relaxed">{question}</p>
+          <div className="flex gap-3 justify-end">
+            <Button variant="outline" onClick={onDeny} className="min-w-20">
+              否
+            </Button>
+            <Button onClick={onConfirm} className="min-w-20 bg-amber-600 hover:bg-amber-700 text-white">
+              是
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }
@@ -539,14 +589,20 @@ export default function DashboardPage() {
     { label: "面试中", value: 0, icon: Calendar, color: "text-green-600", bg: "bg-green-50" },
     { label: "已录用", value: 0, icon: CheckCircle2, color: "text-emerald-600", bg: "bg-emerald-50" },
   ])
+  const [confirmModal, setConfirmModal] = useState<{ question: string } | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const activeRequestRef = useRef<AbortController | null>(null)
   const requestSeqRef = useRef(0)
+  const conversationIdRef = useRef("")
 
   useEffect(() => {
     setResumePath(getDefaultResumePath())
   }, [])
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId
+  }, [conversationId])
 
   useEffect(() => {
     const storedConversationId = window.localStorage.getItem("job-hunt-conversation-id") || ""
@@ -570,17 +626,6 @@ export default function DashboardPage() {
         }
         const mem = payload?.memory || {}
         if (Object.keys(mem).length > 0) {
-          // store memory items for monitoring and UI
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `memory-${Date.now()}`,
-              role: "system",
-              content: `持久记忆同步:\n${Object.entries(mem).map(([k, v]) => `${k}: ${v}`).join('\n')}`,
-              eventType: "memory",
-              data: mem,
-            },
-          ])
           if (mem.last_resume_path) {
             setResumePath(mem.last_resume_path)
           }
@@ -588,8 +633,17 @@ export default function DashboardPage() {
         if (persisted.length === 0) {
           return
         }
-        setMessages(
-          persisted.map((item) => ({
+        const restored: Message[] = []
+        if (payload?.has_older && payload?.older_count > 0) {
+          restored.push({
+            id: "history-compressed",
+            role: "system",
+            content: `此前还有 ${payload.older_count} 条消息已压缩存档，当前显示最近 ${persisted.length} 条。`,
+            eventType: "memory",
+          })
+        }
+        restored.push(
+          ...persisted.map((item) => ({
             id: `persisted-${item.id}`,
             role: item.role,
             content: item.content || "",
@@ -597,6 +651,7 @@ export default function DashboardPage() {
             data: item.data,
           }))
         )
+        setMessages(restored)
         const lastAssistant = [...persisted].reverse().find((item) => item.role === "assistant")
         if (lastAssistant?.content) {
           setFinalMessage(lastAssistant.content)
@@ -727,6 +782,10 @@ export default function DashboardPage() {
           data,
         }])
         break
+      case "await_confirm":
+        setConfirmModal({ question: data?.question || "是否继续？" })
+        setAgentStatus("idle")
+        break
       case "workflow":
         setWorkflowState(data ?? null)
         break
@@ -745,7 +804,7 @@ export default function DashboardPage() {
         setMessages(prev => [...prev, {
           id,
           role: "assistant",
-          content: "",
+          content: data?.message || data?.summary || "",
           eventType: "done",
           data,
         }])
@@ -810,11 +869,11 @@ export default function DashboardPage() {
 
     const attemptConnect = async (): Promise<void> => {
       try {
-        const response = await fetch("http://localhost:8000/api/workflow/run", {
+        const response = await fetch("http://localhost:8000/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            goal: trimmedMessage,
+            message: trimmedMessage,
             resume_path: resumePath,
             conversation_id: conversationId || undefined,
           }),
@@ -927,6 +986,26 @@ export default function DashboardPage() {
     void sendMessage(lastSubmittedMessage)
   }, [lastSubmittedMessage, sendMessage])
 
+  const startNewConversation = useCallback(() => {
+    if (activeRequestRef.current) {
+      activeRequestRef.current.abort()
+      activeRequestRef.current = null
+    }
+    window.localStorage.removeItem("job-hunt-conversation-id")
+    setConversationId("")
+    setMessages([])
+    setAgentStatus("idle")
+    setCurrentTool("")
+    setFinalMessage("")
+    setLastSubmittedMessage("")
+    setPlanSteps([])
+    setAgentActivities([])
+    setModelDecisions([])
+    setReasoningTrace([])
+    setLastToolResult(null)
+    setWorkflowState(null)
+  }, [])
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (inputValue.trim()) {
@@ -949,8 +1028,31 @@ export default function DashboardPage() {
     "帮我写一封求职信",
   ]
 
+  const handleConfirm = useCallback(async (confirmed: boolean) => {
+    setConfirmModal(null)
+    setAgentStatus("running")
+    const cid = conversationIdRef.current
+    if (!cid) return
+    try {
+      await fetch("http://localhost:8000/api/chat/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: cid, confirmed }),
+      })
+    } catch {
+      // best-effort; agent will timeout and cancel gracefully
+    }
+  }, [])
+
   return (
     <div className="flex flex-col h-[calc(100vh-140px)] gap-4">
+      {confirmModal && (
+        <ConfirmModal
+          question={confirmModal.question}
+          onConfirm={() => handleConfirm(true)}
+          onDeny={() => handleConfirm(false)}
+        />
+      )}
       {/* Top section: compact stats */}
       <div className="flex items-center justify-between gap-4 shrink-0">
         <div className="flex items-center gap-3">
@@ -968,10 +1070,22 @@ export default function DashboardPage() {
             </Card>
           ))}
         </div>
-        <Badge variant="outline" className="text-xs gap-1.5 py-1 shrink-0">
-          <Briefcase className="size-3" />
-          求职助手
-        </Badge>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={startNewConversation}
+          >
+            <RotateCcw className="size-3" />
+            新对话
+          </Button>
+          <Badge variant="outline" className="text-xs gap-1.5 py-1">
+            <Briefcase className="size-3" />
+            求职助手
+          </Badge>
+        </div>
       </div>
 
       <div className="grid flex-1 min-h-0 gap-4 xl:grid-cols-[minmax(0,1.5fr)_380px]">

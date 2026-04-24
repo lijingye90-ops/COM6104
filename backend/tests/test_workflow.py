@@ -196,3 +196,63 @@ class TestWorkflowRun:
         progress_events = [event for event in events if event["event"] == "tool_progress"]
         assert any(event["data"]["tool"] == "browser_job_search" for event in progress_events)
         assert any(event["data"]["tool"] == "apply_worker" for event in progress_events)
+
+    @pytest.mark.asyncio
+    @patch("workflow.send_email")
+    @patch("workflow._agent_d_interview_prep_worker", new_callable=AsyncMock)
+    @patch("workflow._agent_c_customize_worker", new_callable=AsyncMock)
+    @patch("workflow._agent_b_match_worker", new_callable=AsyncMock)
+    @patch("workflow._apply_worker", new_callable=AsyncMock)
+    @patch("workflow._agent_a_search_worker", new_callable=AsyncMock)
+    async def test_run_workflow_auto_sends_email_only_application(
+        self,
+        mock_search,
+        mock_apply,
+        mock_match,
+        mock_customize,
+        mock_interview,
+        mock_send_email,
+    ):
+        from workflow import run_workflow
+
+        mock_search.return_value = [
+            {"job_id": "job-1", "title": "Software Engineer", "company": "Starbridge", "url": "https://news.ycombinator.com/item?id=1", "description": "Python"}
+        ]
+        mock_match.return_value = {
+            "job_id": "job-1",
+            "title": "Software Engineer",
+            "company": "Starbridge",
+            "url": "https://news.ycombinator.com/item?id=1",
+            "description": "Python",
+            "selection_reason": "best match",
+        }
+        mock_customize.return_value = {
+            "resume_file_path": "/tmp/resume_job-1.md",
+            "cover_letter_file_path": "/tmp/cover_job-1.md",
+        }
+        mock_apply.return_value = {
+            "status": "fallback",
+            "reason": "email_only_application",
+            "package": {
+                "resume_pdf": "/tmp/resume_job-1.pdf",
+                "cover_letter": "/tmp/cover_job-1.md",
+                "job_url": "https://news.ycombinator.com/item?id=1",
+                "apply_email": "recruiting@starbridge.ai",
+            },
+        }
+        mock_send_email.return_value = {
+            "status": "sent",
+            "provider": "resend",
+            "message_id": "re_123",
+        }
+        mock_interview.return_value = {"questions": []}
+
+        events = await _collect(
+            run_workflow(goal="python backend", conversation_id="conv-email", resume_path="/tmp/resume.pdf")
+        )
+
+        tool_starts = [event for event in events if event["event"] == "tool_start"]
+        assert any(event["data"]["tool"] == "send_email" for event in tool_starts)
+        done_payload = next(event["data"] for event in events if event["event"] == "done")
+        assert done_payload["workflow_state"]["apply_result"]["status"] == "applied"
+        assert done_payload["workflow_state"]["apply_result"]["channel"] == "email"

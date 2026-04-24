@@ -6,11 +6,13 @@ import json
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
 from agent import run_agent
+import confirm_store
 from db import (
+    count_chat_messages,
     get_conversation_context,
     get_memory_items,
     init_db,
@@ -31,8 +33,9 @@ from tools.linkedin_apply import (
     linkedin_auto_apply,
     external_auto_apply,
     build_email_application_assist,
+    _llm_fill_fields,
 )
-from tools.email_sender import send_email_via_resend
+from tools.email_sender import send_email as send_email_message
 from llm_client import get_base_url, get_model, get_model_routing_summary, get_pool_size
 
 app = FastAPI(title="Job Hunt Agent API")
@@ -46,6 +49,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Conversation-Id"],
 )
 
 
@@ -60,6 +64,22 @@ def startup():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ── Internal (browser-harness callbacks) ─────────────────────────────────────
+
+
+@app.post("/api/internal/llm-fill")
+async def llm_fill_fields(request: dict):
+    """Called by browser-harness to let LLM decide values for unknown form fields."""
+    import asyncio
+    from typing import Any
+
+    fields = request.get("fields", [])
+    profile = request.get("profile", {})
+    job_title = request.get("job_title", "")
+    company = request.get("company", "")
+    return await _llm_fill_fields(fields, profile, job_title, company)
 
 
 @app.get("/api/meta/model")
@@ -132,16 +152,60 @@ class SendEmailRequest(BaseModel):
     cover_letter_path: str = ""
 
 
+_HISTORY_DISPLAY_LIMIT = 40  # show latest N messages; older ones are summarised
+
 @app.get("/api/chat/history")
 def chat_history(conversation_id: str):
     raw_state = get_workflow_state(conversation_id)
     workflow_payload = build_workflow_payload(raw_state) if raw_state else None
+    total = count_chat_messages(conversation_id)
+    messages = list_chat_messages(conversation_id, limit=_HISTORY_DISPLAY_LIMIT)
+    older_count = max(0, total - _HISTORY_DISPLAY_LIMIT)
     return {
         "conversation_id": conversation_id,
-        "messages": list_chat_messages(conversation_id),
+        "messages": messages,
+        "has_older": older_count > 0,
+        "older_count": older_count,
         "memory": get_memory_items(),
         "workflow": workflow_payload,
     }
+
+
+# ── File download ─────────────────────────────────────────────────────────────
+
+_ALLOWED_DOWNLOAD_PREFIXES = [
+    Path(tempfile.gettempdir()).resolve(),
+    (Path(__file__).parent / "data").resolve(),
+]
+
+
+@app.get("/api/files/download")
+async def download_file(path: str):
+    """Serve a generated artifact (resume, cover letter) for browser download."""
+    resolved = Path(path).resolve()
+    if not any(str(resolved).startswith(str(p)) for p in _ALLOWED_DOWNLOAD_PREFIXES):
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed directories")
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(
+        path=str(resolved),
+        filename=resolved.name,
+        media_type="application/octet-stream",
+    )
+
+
+class ConfirmRequest(BaseModel):
+    conversation_id: str
+    confirmed: bool
+
+
+@app.post("/api/chat/confirm")
+async def chat_confirm(req: ConfirmRequest):
+    """Called by frontend when user clicks Yes/No on an ask_user modal."""
+    ok = confirm_store.resolve(req.conversation_id, req.confirmed)
+    if not ok:
+        raise HTTPException(status_code=404, detail="No pending confirmation for this conversation")
+    return {"ok": True}
 
 
 @app.get("/api/workflow/state")
@@ -237,11 +301,12 @@ async def chat(req: ChatRequest):
             effective_resume_path,
             conversation_history=prior_history,
             memory_context=get_memory_items(),
+            conversation_id=conversation_id,
         ):
             event_type = event.get("event", "message")
             payload = event.get("data", {})
             content = payload.get("text") or payload.get("content") or payload.get("message") or ""
-            if event_type in {"plan", "reasoning", "done", "error"}:
+            if event_type in {"plan", "reasoning", "done", "error", "await_confirm"}:
                 save_chat_message(
                     conversation_id=conversation_id,
                     role="assistant",
@@ -317,7 +382,7 @@ async def apply_job(req: JobApplyRequest):
     notes = apply_result.get("detail") or apply_result.get("reason", "")
     if apply_result.get("status") == "fallback" and apply_result.get("reason") == "email_only_application":
         package = apply_result.get("package", {})
-        apply_result["email_assist"] = build_email_application_assist(
+        email_assist = build_email_application_assist(
             company=req.company,
             title=req.title,
             job_url=req.url,
@@ -325,6 +390,27 @@ async def apply_job(req: JobApplyRequest):
             cover_letter_path=customized.get("cover_letter_file_path", ""),
             apply_email=package.get("apply_email", ""),
         )
+        apply_result["email_assist"] = email_assist
+        try:
+            email_result = send_email_message(
+                to_email=email_assist.get("apply_email", ""),
+                subject=email_assist.get("subject", ""),
+                body=email_assist.get("body", ""),
+                resume_path=email_assist.get("resume_pdf", ""),
+                cover_letter_path=email_assist.get("cover_letter", ""),
+            )
+            apply_result = {
+                "status": "applied",
+                "job_id": req.job_id,
+                "detail": f"Application email sent via {email_result.get('provider', 'email')}",
+                "channel": "email",
+                "package": package,
+                "email_assist": email_assist,
+                "email_result": email_result,
+            }
+        except Exception as exc:
+            apply_result["email_send_error"] = str(exc)
+            notes = str(exc)
 
     record = track_application(
         job_id=req.job_id,
@@ -372,7 +458,7 @@ def prepare_interview(req: InterviewPrepRequest):
 @app.post("/api/email/send")
 def send_email(req: SendEmailRequest):
     try:
-        return send_email_via_resend(
+        return send_email_message(
             to_email=req.to_email,
             subject=req.subject,
             body=req.body,

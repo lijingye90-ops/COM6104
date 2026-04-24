@@ -94,10 +94,11 @@ class TestJobSearchEndpoint:
 
 
 class TestJobApplyEndpoint:
+    @patch("main.send_email_message")
     @patch("main.external_auto_apply", new_callable=AsyncMock)
     @patch("main.linkedin_auto_apply", new_callable=AsyncMock)
     @patch("main.resume_customizer")
-    def test_apply_linkedin_job_tracks_application(self, mock_customize, mock_apply, mock_external_apply, client):
+    def test_apply_linkedin_job_tracks_application(self, mock_customize, mock_apply, mock_external_apply, mock_send_email, client):
         mock_customize.return_value = {
             "resume_file_path": "/tmp/resume_job-001.md",
             "cover_letter_file_path": "/tmp/cover_job-001.md",
@@ -107,6 +108,7 @@ class TestJobApplyEndpoint:
             "job_id": "job-001",
             "detail": "Easy Apply submitted",
         }
+        mock_send_email.return_value = {"status": "sent"}
 
         resp = client.post(
             "/api/jobs/apply",
@@ -126,9 +128,10 @@ class TestJobApplyEndpoint:
         assert data["apply_result"]["status"] == "applied"
         mock_external_apply.assert_not_awaited()
 
+    @patch("main.send_email_message")
     @patch("main.external_auto_apply", new_callable=AsyncMock)
     @patch("main.resume_customizer")
-    def test_apply_non_linkedin_job_uses_external_flow(self, mock_customize, mock_external_apply, client):
+    def test_apply_non_linkedin_job_uses_external_flow(self, mock_customize, mock_external_apply, mock_send_email, client):
         mock_customize.return_value = {
             "resume_file_path": "/tmp/resume_job-002.md",
             "cover_letter_file_path": "/tmp/cover_job-002.md",
@@ -137,6 +140,7 @@ class TestJobApplyEndpoint:
             "status": "fallback",
             "reason": "no_application_path_found",
         }
+        mock_send_email.return_value = {"status": "sent"}
 
         resp = client.post(
             "/api/jobs/apply",
@@ -162,6 +166,49 @@ class TestJobApplyEndpoint:
             job_title="SRE",
             company="Pave",
         )
+
+    @patch("main.send_email_message")
+    @patch("main.external_auto_apply", new_callable=AsyncMock)
+    @patch("main.resume_customizer")
+    def test_apply_non_linkedin_email_only_job_sends_email(self, mock_customize, mock_external_apply, mock_send_email, client):
+        mock_customize.return_value = {
+            "resume_file_path": "/tmp/resume_job-003.md",
+            "cover_letter_file_path": "/tmp/cover_job-003.md",
+        }
+        mock_external_apply.return_value = {
+            "status": "fallback",
+            "reason": "email_only_application",
+            "package": {
+                "resume_pdf": "/tmp/resume_job-003.pdf",
+                "cover_letter": "/tmp/cover_job-003.md",
+                "job_url": "https://news.ycombinator.com/item?id=3",
+                "apply_email": "recruiting@starbridge.ai",
+            },
+        }
+        mock_send_email.return_value = {
+            "status": "sent",
+            "provider": "resend",
+            "message_id": "re_123",
+        }
+
+        resp = client.post(
+            "/api/jobs/apply",
+            json={
+                "job_id": "job-003",
+                "title": "Software Engineer",
+                "company": "Starbridge",
+                "url": "https://news.ycombinator.com/item?id=3",
+                "description": "Python role",
+                "resume_path": "/tmp/resume.pdf",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["application"]["status"] == "applied"
+        assert data["apply_result"]["status"] == "applied"
+        assert data["apply_result"]["channel"] == "email"
+        mock_send_email.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +331,7 @@ class TestInterviewPrepEndpoint:
 
 
 class TestSendEmailEndpoint:
-    @patch("main.send_email_via_resend")
+    @patch("main.send_email_message")
     def test_send_email_returns_provider_result(self, mock_send_email, client):
         mock_send_email.return_value = {
             "status": "sent",

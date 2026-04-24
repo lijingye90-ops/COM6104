@@ -169,17 +169,42 @@ def save_chat_message(
     return dict(row) if row else {}
 
 
-def list_chat_messages(conversation_id: str) -> list[dict]:
+def count_chat_messages(conversation_id: str) -> int:
+    """Return total number of saved messages for a conversation."""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    row = conn.execute(
+        "SELECT COUNT(*) FROM chat_messages WHERE conversation_id=?",
+        (conversation_id,),
+    ).fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def list_chat_messages(conversation_id: str, limit: int | None = None) -> list[dict]:
+    """Return messages ordered by id ASC, capped to *limit* most-recent rows."""
     init_db()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        """SELECT id, conversation_id, role, event_type, content, payload_json, created_at
-           FROM chat_messages
-           WHERE conversation_id=?
-           ORDER BY id ASC""",
-        (conversation_id,),
-    ).fetchall()
+    if limit is not None:
+        # Fetch the latest `limit` rows then re-sort ascending for display
+        rows = conn.execute(
+            """SELECT id, conversation_id, role, event_type, content, payload_json, created_at
+               FROM chat_messages
+               WHERE conversation_id=?
+               ORDER BY id DESC
+               LIMIT ?""",
+            (conversation_id, limit),
+        ).fetchall()
+        rows = list(reversed(rows))
+    else:
+        rows = conn.execute(
+            """SELECT id, conversation_id, role, event_type, content, payload_json, created_at
+               FROM chat_messages
+               WHERE conversation_id=?
+               ORDER BY id ASC""",
+            (conversation_id,),
+        ).fetchall()
     conn.close()
     messages: list[dict] = []
     for row in rows:

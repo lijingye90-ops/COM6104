@@ -6,11 +6,17 @@ import json
 import re
 from pathlib import Path
 
+from db import get_conversation_context
 from llm_client import create_chat_completion, create_client
 from tools.job_search import browser_job_search
 from tools.interview_prep import interview_prep
 from tools.resume_customizer import _extract_pdf_text, resume_customizer
-from tools.linkedin_apply import external_auto_apply, linkedin_auto_apply
+from tools.linkedin_apply import (
+    build_email_application_assist,
+    external_auto_apply,
+    linkedin_auto_apply,
+)
+from tools.email_sender import send_email
 from workflow_store import (
     create_or_reset_workflow_state,
     get_workflow_state,
@@ -300,6 +306,46 @@ async def _apply_worker(job: dict, customized: dict, progress_callback=None) -> 
     )
 
 
+async def _maybe_send_email_only_application(job: dict, customized: dict, apply_result: dict) -> tuple[dict, dict | None]:
+    if apply_result.get("status") != "fallback" or apply_result.get("reason") != "email_only_application":
+        return apply_result, None
+
+    package = apply_result.get("package", {})
+    email_assist = build_email_application_assist(
+        company=job.get("company", ""),
+        title=job.get("title", ""),
+        job_url=job.get("url", ""),
+        resume_pdf_path=package.get("resume_pdf", ""),
+        cover_letter_path=customized.get("cover_letter_file_path", ""),
+        apply_email=package.get("apply_email", ""),
+    )
+    apply_result = {**apply_result, "email_assist": email_assist}
+
+    try:
+        email_result = await asyncio.to_thread(
+            send_email,
+            to_email=email_assist.get("apply_email", ""),
+            subject=email_assist.get("subject", ""),
+            body=email_assist.get("body", ""),
+            resume_path=email_assist.get("resume_pdf", ""),
+            cover_letter_path=email_assist.get("cover_letter", ""),
+        )
+    except Exception as exc:
+        apply_result["email_send_error"] = str(exc)
+        return apply_result, None
+
+    sent_result = {
+        "status": "applied",
+        "job_id": str(job.get("job_id") or ""),
+        "detail": f"Application email sent via {email_result.get('provider', 'email')}",
+        "channel": "email",
+        "package": package,
+        "email_assist": email_assist,
+        "email_result": email_result,
+    }
+    return sent_result, email_result
+
+
 def _done_payload(
     state: dict,
     last_tool_result: dict | None = None,
@@ -485,6 +531,44 @@ async def run_workflow(
             ):
                 yield progress_event
             apply_result = await apply_task
+
+            if apply_result.get("status") == "fallback" and apply_result.get("reason") == "email_only_application":
+                yield {"event": "reasoning", "data": {"text": "检测到该岗位只接受邮箱投递，正在自动生成并发送申请邮件。"}}
+                package = apply_result.get("package", {})
+                yield {
+                    "event": "tool_start",
+                    "data": {
+                        "tool": "send_email",
+                        "args": {"to_email": package.get("apply_email", "")},
+                        "agent": "Apply",
+                    },
+                }
+                apply_result, email_result = await _maybe_send_email_only_application(
+                    recommended_job,
+                    customized or {},
+                    apply_result,
+                )
+                if email_result is not None:
+                    yield {
+                        "event": "tool_result",
+                        "data": {
+                            "tool": "send_email",
+                            "result": email_result,
+                            "agent": "Apply",
+                        },
+                    }
+                else:
+                    email_error = apply_result.get("email_send_error", "邮件发送未执行")
+                    yield {
+                        "event": "tool_progress",
+                        "data": {
+                            "tool": "send_email",
+                            "agent": "Apply",
+                            "stage": "email_send_skipped",
+                            "message": f"自动邮件发送未完成，将保留邮件投递包供继续处理：{email_error}",
+                        },
+                    }
+
             last_tool_result = {"tool": "apply_worker", "result": apply_result}
             state = update_workflow_state(
                 conversation_id,

@@ -19,6 +19,27 @@ if "openai" not in sys.modules:
 
 
 class TestExternalAutoApply:
+    def test_external_apply_script_compiles_for_browser_harness(self):
+        from tools.linkedin_apply import _build_browser_harness_external_apply_script
+
+        script = _build_browser_harness_external_apply_script(
+            job_url="https://news.ycombinator.com/item?id=47603175",
+            resume_pdf_path="/tmp/resume.pdf",
+            cover_letter_path="/tmp/cover.md",
+            job_title="Software Engineer",
+            company="RINSE",
+            profile={
+                "name": "Test User",
+                "email": "test@example.com",
+                "phone": "+1 555 0100",
+                "linkedin": "",
+                "github": "",
+                "website": "",
+            },
+        )
+
+        compile(script, "<string>", "exec")
+
     def test_demo_placeholder_url_skips_browser_automation(self, tmp_path):
         from tools.linkedin_apply import external_auto_apply
         import asyncio
@@ -98,6 +119,25 @@ class TestExternalAutoApply:
 
 
 class TestLinkedinAutoApply:
+    def test_linkedin_apply_script_compiles_for_browser_harness(self):
+        from tools.linkedin_apply import _build_browser_harness_linkedin_apply_script
+
+        script = _build_browser_harness_linkedin_apply_script(
+            job_url="https://www.linkedin.com/jobs/view/123",
+            resume_pdf_path="/tmp/resume.pdf",
+            cover_letter_path="/tmp/cover.md",
+            profile={
+                "name": "Test User",
+                "email": "test@example.com",
+                "phone": "+1 555 0100",
+                "linkedin": "",
+                "github": "",
+                "website": "",
+            },
+        )
+
+        compile(script, "<string>", "exec")
+
     def test_linkedin_harness_apply_returns_applied(self, tmp_path):
         from tools.linkedin_apply import linkedin_auto_apply
         import asyncio
