@@ -1,15 +1,14 @@
 """MCP Tool 2: resume_customizer — GLM-powered resume tailoring + HTML diff."""
 import difflib
 import uuid
-import os
 from pathlib import Path
-from zhipuai import ZhipuAI
 from dotenv import load_dotenv
 import pdfplumber
+from llm_client import create_chat_completion, create_client
 
 load_dotenv()
 TMP_DIR = Path("/tmp")
-client = ZhipuAI(api_key=os.getenv("ZHIPUAI_API_KEY"))
+client = create_client()
 
 
 def resume_customizer(
@@ -54,6 +53,7 @@ def resume_customizer(
     _write_diff_html(original_text, customized_text, diff_html_path)
 
     return {
+        "job_id": jid,
         "original_text": original_text[:500],  # truncated for MCP response
         "customized_text": customized_text,
         "diff_html_path": diff_html_path,
@@ -73,40 +73,71 @@ def _extract_pdf_text(path: Path) -> str:
     return "\n".join(lines)
 
 
-def _customize_resume(original: str, jd: str) -> str:
-    resp = client.chat.completions.create(
-        model="glm-4",
-        messages=[
-            {
-                "role": "system",
-                "content": "你是资深简历改写专家。根据 JD 优化简历，突出相关经验和技能关键词，保持事实准确，不捏造经历。",
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"原始简历（纯文本）：\n{original[:1500]}\n\n"
-                    f"目标职位 JD：\n{jd[:1000]}\n\n"
-                    "请输出改写后的简历（Markdown 格式，保留所有章节标题，只改内容不改结构）。"
-                ),
-            },
-        ],
+def _fallback_customized_resume(original: str, jd: str) -> str:
+    jd_excerpt = jd[:600].strip() or "未提供 JD 摘要"
+    return (
+        "# 定制版简历（兜底输出）\n\n"
+        "以下内容基于原始简历直接保留，用于在模型暂时不可用时继续后续流程。\n\n"
+        "## 目标职位摘要\n"
+        f"{jd_excerpt}\n\n"
+        "## 原始简历正文\n"
+        f"{original[:4000].strip()}"
     )
-    return resp.choices[0].message.content
+
+
+def _fallback_cover_letter(jd: str) -> str:
+    jd_excerpt = jd[:300].strip() or "该岗位"
+    return (
+        "您好，\n\n"
+        "我对这个岗位很感兴趣，并已附上简历供您参考。"
+        f"我尤其关注以下职位方向：{jd_excerpt}\n\n"
+        "如果我的背景与岗位匹配，期待进一步沟通。\n\n"
+        "此致\n敬礼"
+    )
+
+
+def _customize_resume(original: str, jd: str) -> str:
+    try:
+        resp = create_chat_completion(
+            client=client,
+            stage="resume_customize",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是资深简历改写专家。根据 JD 优化简历，突出相关经验和技能关键词，保持事实准确，不捏造经历。",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"原始简历（纯文本）：\n{original[:1500]}\n\n"
+                        f"目标职位 JD：\n{jd[:1000]}\n\n"
+                        "请输出改写后的简历（Markdown 格式，保留所有章节标题，只改内容不改结构）。"
+                    ),
+                },
+            ],
+        )
+        return resp.choices[0].message.content
+    except Exception:
+        return _fallback_customized_resume(original, jd)
 
 
 def _generate_cover_letter(original: str, jd: str) -> str:
-    resp = client.chat.completions.create(
-        model="glm-4",
-        messages=[{
-            "role": "user",
-            "content": (
-                f"简历摘要：\n{original[:800]}\n\n"
-                f"目标 JD：\n{jd[:600]}\n\n"
-                "请生成一封 200 字以内的中文 Cover Letter，突出与 JD 的匹配点。"
-            ),
-        }],
-    )
-    return resp.choices[0].message.content
+    try:
+        resp = create_chat_completion(
+            client=client,
+            stage="cover_letter",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"简历摘要：\n{original[:800]}\n\n"
+                    f"目标 JD：\n{jd[:600]}\n\n"
+                    "请生成一封 200 字以内的中文 Cover Letter，突出与 JD 的匹配点。"
+                ),
+            }],
+        )
+        return resp.choices[0].message.content
+    except Exception:
+        return _fallback_cover_letter(jd)
 
 
 def _write_diff_html(original: str, customized: str, output_path: str) -> None:

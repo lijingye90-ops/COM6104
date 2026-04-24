@@ -4,11 +4,27 @@ All external dependencies (agent, DB) are mocked or redirected to temp storage.
 """
 import json
 import sqlite3
+import sys
+import types
 from pathlib import Path
 from unittest.mock import patch, AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+
+if "openai" not in sys.modules:
+    openai_stub = types.ModuleType("openai")
+    openai_stub.APIConnectionError = RuntimeError
+    openai_stub.APITimeoutError = RuntimeError
+    openai_stub.InternalServerError = RuntimeError
+    openai_stub.RateLimitError = RuntimeError
+
+    class _OpenAI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    openai_stub.OpenAI = _OpenAI
+    sys.modules["openai"] = openai_stub
 
 
 # ---------------------------------------------------------------------------
@@ -47,6 +63,107 @@ class TestHealthEndpoint:
         assert resp.json() == {"status": "ok"}
 
 
+class TestJobSearchEndpoint:
+    @patch("main.browser_job_search", new_callable=AsyncMock)
+    def test_job_search_returns_jobs(self, mock_search, client):
+        mock_search.return_value = [
+            {
+                "job_id": "job-001",
+                "title": "Backend Engineer",
+                "company": "Acme",
+                "url": "https://example.com/jobs/1",
+                "description": "Python and FastAPI role",
+                "location": "Remote",
+                "source": "remoteok",
+                "posted_at": "2026-04-23T00:00:00Z",
+                "match_score": 0,
+                "match_reason": "",
+            }
+        ]
+
+        resp = client.get("/api/jobs/search", params={"query": "python"})
+
+        assert resp.status_code == 200
+        assert resp.json()["jobs"][0]["job_id"] == "job-001"
+        mock_search.assert_awaited_once_with(
+            query="python",
+            location="remote",
+            limit=10,
+            source="remoteok",
+        )
+
+
+class TestJobApplyEndpoint:
+    @patch("main.external_auto_apply", new_callable=AsyncMock)
+    @patch("main.linkedin_auto_apply", new_callable=AsyncMock)
+    @patch("main.resume_customizer")
+    def test_apply_linkedin_job_tracks_application(self, mock_customize, mock_apply, mock_external_apply, client):
+        mock_customize.return_value = {
+            "resume_file_path": "/tmp/resume_job-001.md",
+            "cover_letter_file_path": "/tmp/cover_job-001.md",
+        }
+        mock_apply.return_value = {
+            "status": "applied",
+            "job_id": "job-001",
+            "detail": "Easy Apply submitted",
+        }
+
+        resp = client.post(
+            "/api/jobs/apply",
+            json={
+                "job_id": "job-001",
+                "title": "Backend Engineer",
+                "company": "Acme",
+                "url": "https://www.linkedin.com/jobs/view/1",
+                "description": "Python role",
+                "resume_path": "/tmp/resume.pdf",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["application"]["status"] == "applied"
+        assert data["apply_result"]["status"] == "applied"
+        mock_external_apply.assert_not_awaited()
+
+    @patch("main.external_auto_apply", new_callable=AsyncMock)
+    @patch("main.resume_customizer")
+    def test_apply_non_linkedin_job_uses_external_flow(self, mock_customize, mock_external_apply, client):
+        mock_customize.return_value = {
+            "resume_file_path": "/tmp/resume_job-002.md",
+            "cover_letter_file_path": "/tmp/cover_job-002.md",
+        }
+        mock_external_apply.return_value = {
+            "status": "fallback",
+            "reason": "no_application_path_found",
+        }
+
+        resp = client.post(
+            "/api/jobs/apply",
+            json={
+                "job_id": "job-002",
+                "title": "SRE",
+                "company": "Pave",
+                "url": "https://remoteok.com/remote-jobs/123",
+                "description": "Infra role",
+                "resume_path": "/tmp/resume.pdf",
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["application"]["status"] == "fallback"
+        assert data["apply_result"]["reason"] == "no_application_path_found"
+        mock_external_apply.assert_awaited_once_with(
+            job_url="https://remoteok.com/remote-jobs/123",
+            resume_md_path="/tmp/resume_job-002.md",
+            job_id="job-002",
+            cover_letter_path="/tmp/cover_job-002.md",
+            job_title="SRE",
+            company="Pave",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests: POST /api/resume/upload
 # ---------------------------------------------------------------------------
@@ -65,6 +182,8 @@ class TestResumeUpload:
         assert "path" in data
         assert data["filename"] == "resume.pdf"
         assert data["path"].endswith(".pdf")
+        assert "preview_text" in data
+        assert "size_bytes" in data
 
     def test_upload_non_pdf_returns_400(self, client):
         """Uploading a non-PDF file (.txt) should return 400."""
@@ -112,11 +231,79 @@ class TestGetApplications:
 
     def test_get_applications_empty_on_fresh_db(self, client):
         """On a fresh (test) database, applications should be empty."""
-        # Note: the startup event calls seed_db(), so after startup there may
-        # be 2 seed records.  For a truly empty test we check the shape.
         resp = client.get("/api/applications")
         assert resp.status_code == 200
-        assert isinstance(resp.json(), list)
+        assert resp.json() == []
+
+
+class TestResumeCustomizeEndpoint:
+    @patch("main.resume_customizer")
+    def test_customize_resume_returns_payload(self, mock_customize, client):
+        mock_customize.return_value = {
+            "job_id": "job-123",
+            "customized_text": "# Resume",
+            "cover_letter": "letter",
+            "diff_html_path": "/tmp/diff_job-123.html",
+            "resume_file_path": "/tmp/resume_job-123.md",
+            "cover_letter_file_path": "/tmp/cover_job-123.md",
+        }
+
+        resp = client.post(
+            "/api/resume/customize",
+            json={
+                "resume_path": "/tmp/resume.pdf",
+                "job_description": "frontend engineer",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["job_id"] == "job-123"
+
+
+class TestInterviewPrepEndpoint:
+    @patch("main.interview_prep")
+    def test_interview_prep_returns_payload(self, mock_interview_prep, client):
+        mock_interview_prep.return_value = {
+            "company": "Acme",
+            "role": "Frontend Engineer",
+            "questions": ["Q1"],
+            "star_answers": [{"question": "Q1", "star": {"S": "s", "T": "t", "A": "a", "R": "r"}}],
+        }
+
+        resp = client.post(
+            "/api/interview/prep",
+            json={
+                "company": "Acme",
+                "job_title": "Frontend Engineer",
+                "job_description": "React and TypeScript",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["questions"] == ["Q1"]
+
+
+class TestSendEmailEndpoint:
+    @patch("main.send_email_via_resend")
+    def test_send_email_returns_provider_result(self, mock_send_email, client):
+        mock_send_email.return_value = {
+            "status": "sent",
+            "provider": "resend",
+            "message_id": "re_123",
+        }
+
+        resp = client.post(
+            "/api/email/send",
+            json={
+                "to_email": "jobs@example.com",
+                "subject": "Application",
+                "body": "Hello",
+                "resume_path": "/tmp/resume.pdf",
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["provider"] == "resend"
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +403,11 @@ class TestChatEndpoint:
         """resume_path should be forwarded to run_agent."""
         captured_args = {}
 
-        async def capture_gen(msg, resume_path=None):
+        async def capture_gen(msg, resume_path=None, conversation_history=None, memory_context=None):
             captured_args["msg"] = msg
             captured_args["resume_path"] = resume_path
+            captured_args["conversation_history"] = conversation_history
+            captured_args["memory_context"] = memory_context
             yield {"event": "done", "data": {"message": "ok", "last_tool_result": None}}
 
         mock_run_agent.side_effect = capture_gen
@@ -231,6 +420,95 @@ class TestChatEndpoint:
         assert resp.status_code == 200
         # run_agent should have been called (either via side_effect or return_value)
         assert mock_run_agent.called
+        assert captured_args["resume_path"] == "/tmp/my.pdf"
+
+    @patch("main.run_agent")
+    def test_chat_returns_conversation_id_header(self, mock_run_agent, client):
+        async def mock_gen(msg, resume_path=None, conversation_history=None, memory_context=None):
+            yield {"event": "done", "data": {"message": "ok", "last_tool_result": None}}
+
+        mock_run_agent.side_effect = mock_gen
+
+        resp = client.post("/api/chat", json={"message": "remember this"})
+
+        assert resp.status_code == 200
+        assert resp.headers.get("X-Conversation-Id")
+
+    @patch("main.run_agent")
+    def test_chat_history_returns_persisted_messages(self, mock_run_agent, client):
+        async def mock_gen(msg, resume_path=None, conversation_history=None, memory_context=None):
+            yield {"event": "done", "data": {"message": "persisted answer", "last_tool_result": None}}
+
+        mock_run_agent.side_effect = mock_gen
+
+        resp = client.post("/api/chat", json={"message": "save history"})
+        conversation_id = resp.headers.get("X-Conversation-Id")
+
+        history = client.get("/api/chat/history", params={"conversation_id": conversation_id})
+
+        assert history.status_code == 200
+        payload = history.json()
+        assert payload["conversation_id"] == conversation_id
+        assert any(item["content"] == "save history" for item in payload["messages"])
+        assert any(item["content"] == "persisted answer" for item in payload["messages"])
+        assert "workflow" in payload
+
+
+class TestWorkflowEndpoint:
+    @patch("main.run_workflow")
+    def test_workflow_run_returns_conversation_id_header(self, mock_run_workflow, client):
+        async def mock_gen(*args, **kwargs):
+            yield {"event": "plan", "data": {"steps": ["A", "B", "C"]}}
+            yield {
+                "event": "done",
+                "data": {
+                    "summary": "workflow done",
+                    "message": "workflow done",
+                    "workflow_state": {"conversation_id": "conv-x", "current_stage": "apply_done"},
+                },
+            }
+
+        mock_run_workflow.side_effect = mock_gen
+
+        resp = client.post("/api/workflow/run", json={"goal": "python backend"})
+
+        assert resp.status_code == 200
+        assert resp.headers.get("X-Conversation-Id")
+
+    @patch("main.run_workflow")
+    def test_workflow_run_persists_user_and_done_messages(self, mock_run_workflow, client):
+        async def mock_gen(*args, **kwargs):
+            yield {
+                "event": "done",
+                "data": {
+                    "summary": "workflow done",
+                    "message": "workflow done",
+                    "workflow_state": {"current_stage": "apply_done"},
+                },
+            }
+
+        mock_run_workflow.side_effect = mock_gen
+
+        resp = client.post("/api/workflow/run", json={"goal": "site reliability engineer"})
+        conversation_id = resp.headers.get("X-Conversation-Id")
+
+        history = client.get("/api/chat/history", params={"conversation_id": conversation_id})
+
+        assert history.status_code == 200
+        payload = history.json()
+        assert any(item["content"] == "site reliability engineer" for item in payload["messages"])
+        assert any(item["content"] == "workflow done" for item in payload["messages"])
+
+    def test_workflow_state_endpoint_returns_payload(self, client):
+        from workflow_store import create_or_reset_workflow_state, update_workflow_state
+
+        create_or_reset_workflow_state("conv-state-1", goal="python backend")
+        update_workflow_state("conv-state-1", current_stage="match_done", recommended_job={"job_id": "job-1"})
+
+        resp = client.get("/api/workflow/state", params={"conversation_id": "conv-state-1"})
+
+        assert resp.status_code == 200
+        assert resp.json()["workflow"]["current_stage"] == "match_done"
 
 
 # ---------------------------------------------------------------------------

@@ -2,15 +2,22 @@
 import json
 import os
 import asyncio
+import re
 from pathlib import Path
-from zhipuai import ZhipuAI
 from dotenv import load_dotenv
 from tools import browser_job_search, resume_customizer, interview_prep
 from tools.resume_customizer import _extract_pdf_text
 from db import track_application
+from llm_client import (
+    consume_decision_log,
+    create_chat_completion,
+    create_client,
+    get_model,
+    reset_decision_log,
+)
 
 load_dotenv()
-client = ZhipuAI(api_key=os.getenv("ZHIPUAI_API_KEY"))
+client = create_client()
 
 # ── System prompt template ────────────────────────────────────────────────────
 
@@ -100,12 +107,36 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "external_auto_apply",
+            "description": "自动投递非 LinkedIn 的外部招聘页面。browser harness 分析表单结构、填写标准字段、上传简历并提交。遇到 login wall 或非标准字段时降级返回投递包。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "job_url":           {"type": "string", "description": "职位申请页 URL（非 LinkedIn）"},
+                    "resume_md_path":    {"type": "string", "description": "定制后的 Markdown 简历路径"},
+                    "job_id":            {"type": "string", "description": "职位 ID"},
+                    "cover_letter_path": {"type": "string", "description": "Cover Letter 路径（可选）"},
+                    "job_title":         {"type": "string", "description": "职位名称，用于匹配岗位链接（可选）"},
+                    "company":           {"type": "string", "description": "公司名称（可选）"},
+                },
+                "required": ["job_url", "resume_md_path", "job_id"],
+            },
+        },
+    },
 ]
 
 
 # ── Agent loop (async generator yielding SSE events) ─────────────────────────
 
-async def run_agent(user_message: str, resume_path: str | None = None):
+async def run_agent(
+    user_message: str,
+    resume_path: str | None = None,
+    conversation_history: list[dict] | None = None,
+    memory_context: dict[str, str] | None = None,
+):
     """
     Run the job hunt agent as an async generator.
     Yields dicts with SSE event structure: {"event": ..., "data": {...}}
@@ -120,32 +151,77 @@ async def run_agent(user_message: str, resume_path: str | None = None):
         except Exception as e:
             resume_summary = f"（简历解析失败: {e}）"
 
-    system_content = SYSTEM_PROMPT.format(resume_summary=resume_summary)
+    memory_lines = []
+    if memory_context:
+        for key, value in memory_context.items():
+            if value:
+                memory_lines.append(f"- {key}: {value}")
+    memory_block = "\n".join(memory_lines) if memory_lines else "（暂无持久记忆）"
+    system_content = (
+        SYSTEM_PROMPT.format(resume_summary=resume_summary)
+        + f"\n\n[持久记忆]\n{memory_block}"
+    )
 
     # ── Build initial messages ────────────────────────────────────────────
     content = user_message
     if resume_path:
         content += f"\n\n[简历文件路径: {resume_path}]"
 
-    messages = [
-        {"role": "system", "content": system_content},
-        {"role": "user", "content": content},
-    ]
+    messages = [{"role": "system", "content": system_content}]
+    for item in conversation_history or []:
+        role = item.get("role")
+        text = item.get("content")
+        if role in {"user", "assistant"} and text:
+            messages.append({"role": role, "content": text})
+    messages.append({"role": "user", "content": content})
 
     last_tool_result = None
 
     for _ in range(20):  # max 20 rounds
         # ── Call GLM-4 with error handling ────────────────────────────────
         try:
-            response = client.chat.completions.create(
-                model="glm-4",
+            reset_decision_log()
+            response = create_chat_completion(
+                client=client,
+                stage="agent_orchestrator",
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
             )
+            for decision in consume_decision_log():
+                yield {"event": "decision", "data": decision}
         except Exception as e:
-            yield {"event": "error", "data": {"message": f"GLM-4 API 调用失败: {e}"}}
-            return
+            for decision in consume_decision_log():
+                yield {"event": "decision", "data": decision}
+            
+            # ✅ 改进：记录错误但继续尝试，而不是硬中止
+            import traceback
+            error_msg = f"LLM API 调用失败 (第 {_+1} 轮): {e}\n{traceback.format_exc()}"
+            print(f"[agent] {error_msg}", flush=True)
+            
+            # 如果已有工具结果，返回现有结果；否则重试或返回错误
+            if last_tool_result is not None:
+                yield {
+                    "event": "done",
+                    "data": {
+                        "message": f"模型暂时不可用，已返回当前阶段的可用结果。错误信息：{e}",
+                        "last_tool_result": last_tool_result,
+                    },
+                }
+                return
+            elif _ < 3:  # 前3次失败时自动重试
+                yield {
+                    "event": "reasoning",
+                    "data": {
+                        "text": f"第 {_+1} 次 LLM 调用失败，等待 2 秒后重试...\n错误: {str(e)[:100]}"
+                    },
+                }
+                await asyncio.sleep(2)
+                continue  # 进入下一轮循环重试
+            else:
+                # 多次失败后返回错误
+                yield {"event": "error", "data": {"message": error_msg}}
+                return
 
         message = response.choices[0].message
 
@@ -173,6 +249,9 @@ async def run_agent(user_message: str, resume_path: str | None = None):
 
         # ── Has tool calls → yield reasoning first if content present ────
         if message.content:
+            plan_steps = _extract_plan_steps(message.content)
+            if plan_steps:
+                yield {"event": "plan", "data": {"steps": plan_steps}}
             yield {"event": "reasoning", "data": {"text": message.content}}
 
         # Append assistant message (with tool_calls) to history
@@ -187,6 +266,7 @@ async def run_agent(user_message: str, resume_path: str | None = None):
             yield {"event": "tool_start", "data": {"tool": fn_name, "args": fn_args}}
 
             try:
+                reset_decision_log()
                 result = await _call_tool(fn_name, fn_args)
                 last_tool_result = {"tool": fn_name, "result": result}
                 result_str = json.dumps(result, ensure_ascii=False)
@@ -195,6 +275,8 @@ async def run_agent(user_message: str, resume_path: str | None = None):
                 last_tool_result = {"tool": fn_name, "result": result}
                 result_str = json.dumps(result, ensure_ascii=False)
 
+            for decision in consume_decision_log():
+                yield {"event": "decision", "data": decision}
             yield {"event": "tool_result", "data": {"tool": fn_name, "result": result}}
 
             # Zhipu format: role="tool", tool_call_id must match
@@ -214,6 +296,27 @@ async def run_agent(user_message: str, resume_path: str | None = None):
         }
 
 
+def _extract_plan_steps(content: str) -> list[str]:
+    match = re.search(r"##\s*执行计划\s*(.*)", content, re.DOTALL)
+    if not match:
+        return []
+
+    steps: list[str] = []
+    for line in match.group(1).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        numbered = re.match(r"^\d+\.\s*(.+)$", stripped)
+        if numbered:
+            steps.append(numbered.group(1).strip())
+        elif steps and not stripped.startswith("##"):
+            # Continuation line for the previous step.
+            steps[-1] = f"{steps[-1]} {stripped}"
+        elif stripped.startswith("##"):
+            break
+    return steps
+
+
 async def _call_tool(name: str, args: dict):
     if name == "browser_job_search":
         return await browser_job_search(**args)
@@ -224,4 +327,7 @@ async def _call_tool(name: str, args: dict):
     if name == "linkedin_auto_apply":
         from tools.linkedin_apply import linkedin_auto_apply
         return await linkedin_auto_apply(**args)
+    if name == "external_auto_apply":
+        from tools.linkedin_apply import external_auto_apply
+        return await external_auto_apply(**args)
     raise ValueError(f"Unknown tool: {name}")

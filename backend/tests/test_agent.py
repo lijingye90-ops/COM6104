@@ -456,7 +456,7 @@ class TestRunAgentApiError:
 
         assert len(events) == 1
         assert events[0]["event"] == "error"
-        assert "GLM-4 API 调用失败" in events[0]["data"]["message"]
+        assert "LLM API 调用失败" in events[0]["data"]["message"]
 
 
 # ---------------------------------------------------------------------------

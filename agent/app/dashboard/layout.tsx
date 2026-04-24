@@ -1,5 +1,6 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import { usePathname } from "next/navigation"
 import Link from "next/link"
 import {
@@ -39,6 +40,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Separator } from "@/components/ui/separator"
+import { Badge } from "@/components/ui/badge"
 
 const navItems = [
   { title: "概览", href: "/dashboard", icon: Home },
@@ -55,6 +57,18 @@ export default function DashboardLayout({
   children: React.ReactNode
 }) {
   const pathname = usePathname()
+  const [modelName, setModelName] = useState("")
+
+  useEffect(() => {
+    fetch("http://localhost:8000/api/meta/model")
+      .then((res) => res.json())
+      .then((data) => {
+        setModelName(data?.model || "")
+      })
+      .catch(() => {
+        setModelName("")
+      })
+  }, [])
 
   return (
     <SidebarProvider>
@@ -149,6 +163,12 @@ export default function DashboardLayout({
               {navItems.find(item => item.href === pathname)?.title || "概览"}
             </h1>
           </div>
+          {modelName ? (
+            <Badge variant="outline" className="gap-1.5">
+              <Briefcase className="size-3" />
+              {modelName}
+            </Badge>
+          ) : null}
         </header>
         <main className="flex-1 p-6">
           {children}

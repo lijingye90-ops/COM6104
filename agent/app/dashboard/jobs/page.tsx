@@ -1,12 +1,20 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Checkbox } from "@/components/ui/checkbox"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import {
   Select,
   SelectContent,
@@ -27,124 +35,346 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import {
   Search,
   MapPin,
-  Building2,
-  Clock,
   Bookmark,
   BookmarkCheck,
   ExternalLink,
+  Copy,
   Filter,
   Sparkles,
-  ChevronRight,
   DollarSign,
   Briefcase,
   GraduationCap,
   Loader2,
 } from "lucide-react"
 
-// 模拟职位数据
-const mockJobs = [
-  {
-    id: "1",
-    title: "高级前端工程师",
-    company: "字节跳动",
-    location: "北京",
-    salary: "40-70K",
-    experience: "3-5年",
-    education: "本科",
-    tags: ["React", "TypeScript", "Node.js"],
-    description: "负责抖音电商前端架构设计和核心功能开发，参与前端工程化建设...",
-    postedAt: "2天前",
-    source: "LinkedIn",
-    matchScore: 95,
-    saved: true,
-  },
-  {
-    id: "2",
-    title: "全栈工程师",
-    company: "阿里巴巴",
-    location: "杭州",
-    salary: "35-55K",
-    experience: "3-5年",
-    education: "本科",
-    tags: ["Vue", "Java", "MySQL"],
-    description: "参与淘宝核心业务开发，负责前后端联调和性能优化...",
-    postedAt: "3天前",
-    source: "Indeed",
-    matchScore: 88,
-    saved: false,
-  },
-  {
-    id: "3",
-    title: "前端技术专家",
-    company: "腾讯",
-    location: "深圳",
-    salary: "50-80K",
-    experience: "5年以上",
-    education: "本科",
-    tags: ["React", "微前端", "性能优化"],
-    description: "负责微信生态前端技术规划和团队建设，推动前端技术创新...",
-    postedAt: "1周前",
-    source: "官网",
-    matchScore: 82,
-    saved: false,
-  },
-  {
-    id: "4",
-    title: "Web开发工程师",
-    company: "美团",
-    location: "北京",
-    salary: "30-50K",
-    experience: "2-4年",
-    education: "本科",
-    tags: ["React", "Redux", "Webpack"],
-    description: "参与美团外卖商家端产品开发，负责商家营销工具的前端实现...",
-    postedAt: "5天前",
-    source: "LinkedIn",
-    matchScore: 78,
-    saved: true,
-  },
-  {
-    id: "5",
-    title: "前端开发工程师",
-    company: "快手",
-    location: "北京",
-    salary: "35-60K",
-    experience: "2-4年",
-    education: "本科",
-    tags: ["Vue", "TypeScript", "直播技术"],
-    description: "负责快手直播间前端开发，优化直播互动体验...",
-    postedAt: "1天前",
-    source: "BOSS直聘",
-    matchScore: 85,
-    saved: false,
-  },
-]
+type ApiJob = {
+  job_id: string
+  title: string
+  company: string
+  url: string
+  description: string
+  location: string
+  source: string
+  posted_at: string
+  match_score: number
+  match_reason: string
+}
+
+type Job = {
+  id: string
+  title: string
+  company: string
+  location: string
+  salary: string
+  experience: string
+  education: string
+  tags: string[]
+  description: string
+  postedAt: string
+  source: string
+  matchScore: number
+  matchReason: string
+  saved: boolean
+  url: string
+}
+
+type EmailAssist = {
+  apply_email: string
+  subject: string
+  body: string
+  resume_pdf: string
+  cover_letter: string
+  job_url: string
+}
 
 const sourceColors: Record<string, string> = {
-  "LinkedIn": "bg-blue-100 text-blue-700",
-  "Indeed": "bg-orange-100 text-orange-700",
-  "官网": "bg-green-100 text-green-700",
+  LinkedIn: "bg-blue-100 text-blue-700",
+  Indeed: "bg-orange-100 text-orange-700",
+  官网: "bg-green-100 text-green-700",
   "BOSS直聘": "bg-cyan-100 text-cyan-700",
+  remoteok: "bg-orange-100 text-orange-700",
+  hn: "bg-amber-100 text-amber-700",
+  cached: "bg-slate-100 text-slate-700",
+}
+
+function formatPostedAt(value: string) {
+  if (!value) return "未知"
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return value
+  }
+
+  return date.toLocaleDateString("zh-CN")
+}
+
+function extractTags(job: ApiJob) {
+  const text = `${job.title} ${job.description}`.toLowerCase()
+  const candidates = [
+    "python",
+    "fastapi",
+    "react",
+    "typescript",
+    "docker",
+    "postgresql",
+    "redis",
+    "sql",
+    "ai",
+    "ml",
+  ]
+
+  const matched = candidates
+    .filter((tag) => text.includes(tag))
+    .slice(0, 3)
+    .map((tag) => tag.toUpperCase())
+
+  return matched.length > 0 ? matched : ["通用岗位"]
+}
+
+function repairMojibake(value: string) {
+  if (!/[ÂÃâ]/.test(value)) {
+    return value
+  }
+
+  try {
+    const bytes = Uint8Array.from(
+      Array.from(value).map((char) => char.charCodeAt(0) & 0xff)
+    )
+    return new TextDecoder("utf-8").decode(bytes)
+  } catch {
+    return value
+  }
+}
+
+function decodeHtmlEntities(value: string) {
+  let current = value
+
+  for (let i = 0; i < 3; i += 1) {
+    const textarea = document.createElement("textarea")
+    textarea.innerHTML = current
+    const decoded = textarea.value
+
+    if (decoded === current) {
+      break
+    }
+
+    current = decoded
+  }
+
+  return current
+}
+
+function normalizeDescription(raw: string) {
+  if (!raw) {
+    return "暂无职位描述"
+  }
+
+  const decoded = decodeHtmlEntities(raw)
+  const repaired = repairMojibake(decoded).replaceAll("\u00a0", " ")
+
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(repaired, "text/html")
+
+  doc.querySelectorAll("br").forEach((node) => {
+    node.replaceWith("\n")
+  })
+
+  doc.querySelectorAll("p, li, h1, h2, h3, h4, h5, h6").forEach((node) => {
+    node.append("\n")
+  })
+
+  const text = doc.body.textContent ?? repaired
+
+  return text
+    .replace(/\n{3,}/g, "\n\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim() || "暂无职位描述"
+}
+
+function toUiJob(job: ApiJob): Job {
+  return {
+    id: job.job_id,
+    title: job.title,
+    company: job.company,
+    location: job.location || "Remote",
+    salary: "面议",
+    experience: "未注明",
+    education: "未注明",
+    tags: extractTags(job),
+    description: normalizeDescription(job.description),
+    postedAt: formatPostedAt(job.posted_at),
+    source: job.source || "cached",
+    matchScore: job.match_score || 0,
+    matchReason: job.match_reason || "",
+    saved: false,
+    url: job.url || "",
+  }
 }
 
 export default function JobsPage() {
-  const [jobs, setJobs] = useState(mockJobs)
-  const [searchQuery, setSearchQuery] = useState("前端工程师")
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [searchQuery, setSearchQuery] = useState("python")
   const [isSearching, setIsSearching] = useState(false)
-  const [selectedJob, setSelectedJob] = useState(mockJobs[0])
+  const [selectedJobId, setSelectedJobId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [applyDialogOpen, setApplyDialogOpen] = useState(false)
+  const [resumePathInput, setResumePathInput] = useState("")
+  const [isApplying, setIsApplying] = useState(false)
+  const [applyMessage, setApplyMessage] = useState<string | null>(null)
+  const [emailAssist, setEmailAssist] = useState<EmailAssist | null>(null)
+  const [isSendingEmail, setIsSendingEmail] = useState(false)
+  const [sendEmailMessage, setSendEmailMessage] = useState<string | null>(null)
+  const emailAssistRef = useRef<HTMLDivElement | null>(null)
 
-  const handleSearch = () => {
+  const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? jobs[0] ?? null
+
+  const handleSearch = async () => {
     setIsSearching(true)
-    setTimeout(() => {
+    setError(null)
+
+    try {
+      const response = await fetch(
+        `http://localhost:8000/api/jobs/search?query=${encodeURIComponent(searchQuery)}`
+      )
+
+      if (!response.ok) {
+        throw new Error(`搜索失败: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const nextJobs = (data.jobs ?? []).map(toUiJob)
+      setJobs(nextJobs)
+      setSelectedJobId(nextJobs[0]?.id ?? null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "职位搜索失败")
+      setJobs([])
+      setSelectedJobId(null)
+    } finally {
       setIsSearching(false)
-    }, 1500)
+    }
   }
+
+  useEffect(() => {
+    void handleSearch()
+  }, [])
+
+  useEffect(() => {
+    const savedResumePath = window.localStorage.getItem("job-hunt-resume-path")
+    if (savedResumePath) {
+      setResumePathInput(savedResumePath)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (emailAssist && applyDialogOpen) {
+      emailAssistRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })
+    }
+  }, [emailAssist, applyDialogOpen])
 
   const toggleSave = (id: string) => {
-    setJobs(jobs.map(job => 
-      job.id === id ? { ...job, saved: !job.saved } : job
-    ))
+    setJobs((currentJobs) =>
+      currentJobs.map((job) =>
+        job.id === id ? { ...job, saved: !job.saved } : job
+      )
+    )
   }
+
+  const handleApply = async () => {
+    if (!selectedJob || !resumePathInput.trim()) {
+      setApplyMessage("请先提供 PDF 简历路径。")
+      return
+    }
+
+    setIsApplying(true)
+    setApplyMessage(null)
+    setEmailAssist(null)
+    setSendEmailMessage(null)
+
+    try {
+      const response = await fetch("http://localhost:8000/api/jobs/apply", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          job_id: selectedJob.id,
+          title: selectedJob.title,
+          company: selectedJob.company,
+          url: selectedJob.url,
+          description: selectedJob.description,
+          resume_path: resumePathInput.trim(),
+        }),
+      })
+
+      if (!response.ok) {
+        throw new Error(`申请失败: ${response.status}`)
+      }
+
+      const data = await response.json()
+      const result = data.apply_result
+
+      window.localStorage.setItem("job-hunt-resume-path", resumePathInput.trim())
+
+      if (result.status === "applied") {
+        setApplyMessage("自动投递已提交，申请追踪里也已经记录。")
+      } else if (result.reason === "email_only_application") {
+        setApplyMessage("这个职位是邮箱投递，不是网页表单。我已经帮你准备好邮件申请材料。")
+        setEmailAssist(result.email_assist ?? null)
+      } else if (result.reason === "login_wall") {
+        setApplyMessage("这个职位的申请入口需要先注册或登录账号，当前没法直接自动提交。你可以先登录目标站点后再重试。")
+      } else {
+        setApplyMessage(`已记录为 fallback：${result.reason ?? "请手动继续处理"}`)
+      }
+    } catch (err) {
+      setApplyMessage(err instanceof Error ? err.message : "申请失败")
+    } finally {
+      setIsApplying(false)
+    }
+  }
+
+  const handleCopy = async (value: string) => {
+    await navigator.clipboard.writeText(value)
+  }
+
+  const handleSendEmail = async () => {
+    if (!emailAssist?.apply_email) {
+      setSendEmailMessage("当前没有可发送的收件邮箱。")
+      return
+    }
+
+    setIsSendingEmail(true)
+    setSendEmailMessage(null)
+
+    try {
+      const response = await fetch("http://localhost:8000/api/email/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to_email: emailAssist.apply_email,
+          subject: emailAssist.subject,
+          body: emailAssist.body,
+          resume_path: emailAssist.resume_pdf,
+          cover_letter_path: emailAssist.cover_letter,
+        }),
+      })
+
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data?.detail || "发送失败")
+      }
+
+      setSendEmailMessage(`邮件已通过 Resend 发出${data.message_id ? `（ID: ${data.message_id}）` : ""}。`)
+    } catch (error) {
+      setSendEmailMessage(error instanceof Error ? error.message : "发送失败")
+    } finally {
+      setIsSendingEmail(false)
+    }
+  }
+
+  const mailtoHref = emailAssist
+    ? `mailto:${encodeURIComponent(emailAssist.apply_email || "")}?subject=${encodeURIComponent(emailAssist.subject || "")}&body=${encodeURIComponent(emailAssist.body || "")}`
+    : ""
 
   return (
     <div className="space-y-6">
@@ -153,7 +383,6 @@ export default function JobsPage() {
         <p className="text-muted-foreground">AI 自动搜索多个平台，为你匹配最合适的职位</p>
       </div>
 
-      {/* 搜索栏 */}
       <Card>
         <CardContent className="p-4">
           <div className="flex gap-4">
@@ -173,11 +402,11 @@ export default function JobsPage() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">全部城市</SelectItem>
+                <SelectItem value="remote">远程</SelectItem>
                 <SelectItem value="beijing">北京</SelectItem>
                 <SelectItem value="shanghai">上海</SelectItem>
                 <SelectItem value="hangzhou">杭州</SelectItem>
                 <SelectItem value="shenzhen">深圳</SelectItem>
-                <SelectItem value="guangzhou">广州</SelectItem>
               </SelectContent>
             </Select>
             <Sheet>
@@ -191,7 +420,7 @@ export default function JobsPage() {
                 <SheetHeader>
                   <SheetTitle>筛选条件</SheetTitle>
                   <SheetDescription>
-                    设置更多筛选条件来精准匹配职位
+                    当前版本只接通了基础搜索，筛选项还没有联动到后端。
                   </SheetDescription>
                 </SheetHeader>
                 <div className="space-y-6 py-6">
@@ -245,7 +474,7 @@ export default function JobsPage() {
                 </div>
               </SheetContent>
             </Sheet>
-            <Button onClick={handleSearch} disabled={isSearching}>
+            <Button onClick={() => void handleSearch()} disabled={isSearching}>
               {isSearching ? (
                 <>
                   <Loader2 className="size-4 mr-2 animate-spin" />
@@ -259,12 +488,11 @@ export default function JobsPage() {
               )}
             </Button>
           </div>
+          {error ? <p className="mt-3 text-sm text-destructive">{error}</p> : null}
         </CardContent>
       </Card>
 
-      {/* 职位列表和详情 */}
       <div className="grid lg:grid-cols-[400px_1fr] gap-6">
-        {/* 职位列表 */}
         <Card className="h-[calc(100vh-280px)]">
           <CardHeader className="py-4">
             <div className="flex items-center justify-between">
@@ -287,11 +515,11 @@ export default function JobsPage() {
                 <div
                   key={job.id}
                   className={`p-4 rounded-lg border cursor-pointer transition-colors ${
-                    selectedJob?.id === job.id 
-                      ? "border-foreground bg-muted/50" 
+                    selectedJob?.id === job.id
+                      ? "border-foreground bg-muted/50"
                       : "hover:border-foreground/30"
                   }`}
-                  onClick={() => setSelectedJob(job)}
+                  onClick={() => setSelectedJobId(job.id)}
                 >
                   <div className="flex items-start justify-between mb-2">
                     <div>
@@ -315,8 +543,8 @@ export default function JobsPage() {
                   </div>
                   <div className="flex items-center justify-between">
                     <div className="flex gap-1">
-                      {job.tags.slice(0, 2).map((tag, i) => (
-                        <Badge key={i} variant="secondary" className="text-xs">
+                      {job.tags.slice(0, 2).map((tag) => (
+                        <Badge key={tag} variant="secondary" className="text-xs">
                           {tag}
                         </Badge>
                       ))}
@@ -325,27 +553,30 @@ export default function JobsPage() {
                   </div>
                 </div>
               ))}
+              {!isSearching && jobs.length === 0 ? (
+                <p className="px-2 text-sm text-muted-foreground">没有找到匹配的职位。</p>
+              ) : null}
             </div>
           </ScrollArea>
         </Card>
 
-        {/* 职位详情 */}
-        {selectedJob && (
+        {selectedJob ? (
           <Card className="h-[calc(100vh-280px)]">
             <ScrollArea className="h-full">
               <div className="p-6 space-y-6">
-                {/* 头部信息 */}
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="flex items-center gap-2 mb-1">
                       <h2 className="text-xl font-semibold">{selectedJob.title}</h2>
-                      <Badge className={sourceColors[selectedJob.source]}>{selectedJob.source}</Badge>
+                      <Badge className={sourceColors[selectedJob.source] ?? "bg-slate-100 text-slate-700"}>
+                        {selectedJob.source}
+                      </Badge>
                     </div>
                     <p className="text-lg text-muted-foreground">{selectedJob.company}</p>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Button 
-                      variant="outline" 
+                    <Button
+                      variant="outline"
                       size="icon"
                       onClick={() => toggleSave(selectedJob.id)}
                     >
@@ -355,29 +586,38 @@ export default function JobsPage() {
                         <Bookmark className="size-4" />
                       )}
                     </Button>
-                    <Button>
+                    <Button
+                      disabled={!selectedJob.url}
+                      onClick={() => {
+                        setApplyMessage(null)
+                        setApplyDialogOpen(true)
+                      }}
+                    >
                       立即申请
-                      <ChevronRight className="size-4 ml-1" />
                     </Button>
                   </div>
                 </div>
 
-                {/* 匹配度 */}
-                <Card className="bg-green-50 border-green-200">
-                  <CardContent className="p-4">
-                    <div className="flex items-center gap-4">
-                      <div className="size-14 rounded-full bg-green-100 flex items-center justify-center">
-                        <span className="text-xl font-bold text-green-700">{selectedJob.matchScore}%</span>
+                <Card className="bg-muted/30">
+                  <CardHeader>
+                    <CardTitle className="text-base">AI 匹配分析</CardTitle>
+                    <CardDescription>当前岗位来自后端实时搜索结果。</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-muted-foreground">匹配度</span>
+                        <span className="text-2xl font-semibold text-green-600">
+                          {selectedJob.matchScore}%
+                        </span>
                       </div>
-                      <div>
-                        <p className="font-medium text-green-700">高度匹配</p>
-                        <p className="text-sm text-green-600">你的简历与该职位高度匹配，建议尽快申请</p>
-                      </div>
+                      <p className="text-sm text-muted-foreground">
+                        {selectedJob.matchReason || "当前结果暂未返回匹配原因。"}
+                      </p>
                     </div>
                   </CardContent>
                 </Card>
 
-                {/* 职位信息 */}
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                   <div className="p-4 rounded-lg bg-muted/50">
                     <div className="flex items-center gap-2 text-muted-foreground mb-1">
@@ -411,41 +651,24 @@ export default function JobsPage() {
 
                 <Separator />
 
-                {/* 技能要求 */}
                 <div>
-                  <h3 className="font-medium mb-3">技能要求</h3>
+                  <h3 className="font-medium mb-3">技能关键词</h3>
                   <div className="flex flex-wrap gap-2">
-                    {selectedJob.tags.map((tag, i) => (
-                      <Badge key={i} variant="secondary">
+                    {selectedJob.tags.map((tag) => (
+                      <Badge key={tag} variant="secondary">
                         {tag}
                       </Badge>
                     ))}
                   </div>
                 </div>
 
-                {/* 职位描述 */}
                 <div>
                   <h3 className="font-medium mb-3">职位描述</h3>
-                  <div className="prose prose-sm max-w-none text-muted-foreground">
-                    <p>{selectedJob.description}</p>
-                    <h4 className="text-foreground mt-4">职责：</h4>
-                    <ul>
-                      <li>负责核心业务模块的前端开发和维护</li>
-                      <li>参与前端架构设计和技术选型</li>
-                      <li>优化前端性能，提升用户体验</li>
-                      <li>参与代码评审，保证代码质量</li>
-                    </ul>
-                    <h4 className="text-foreground mt-4">要求：</h4>
-                    <ul>
-                      <li>计算机相关专业本科及以上学历</li>
-                      <li>3年以上前端开发经验</li>
-                      <li>熟练掌握 React/Vue 等主流框架</li>
-                      <li>良好的沟通能力和团队协作精神</li>
-                    </ul>
+                  <div className="prose prose-sm max-w-none text-muted-foreground whitespace-pre-line">
+                    {selectedJob.description}
                   </div>
                 </div>
 
-                {/* 公司信息 */}
                 <div>
                   <h3 className="font-medium mb-3">公司信息</h3>
                   <div className="flex items-center gap-4 p-4 rounded-lg border">
@@ -454,19 +677,145 @@ export default function JobsPage() {
                     </div>
                     <div className="flex-1">
                       <p className="font-medium">{selectedJob.company}</p>
-                      <p className="text-sm text-muted-foreground">互联网/移动互联网 | 10000人以上</p>
+                      <p className="text-sm text-muted-foreground">职位来源：{selectedJob.source}</p>
                     </div>
-                    <Button variant="outline" size="sm">
-                      <ExternalLink className="size-4 mr-2" />
-                      官网
+                    <Button variant="outline" size="sm" asChild disabled={!selectedJob.url}>
+                      <a
+                        href={selectedJob.url || "#"}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        <ExternalLink className="size-4 mr-2" />
+                        原始链接
+                      </a>
                     </Button>
                   </div>
                 </div>
               </div>
             </ScrollArea>
           </Card>
+        ) : (
+          <Card className="h-[calc(100vh-280px)]">
+            <CardContent className="h-full flex items-center justify-center text-sm text-muted-foreground">
+              暂无职位数据，请先执行一次搜索。
+            </CardContent>
+          </Card>
         )}
       </div>
+
+      <Dialog open={applyDialogOpen} onOpenChange={setApplyDialogOpen}>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>发起自动申请</DialogTitle>
+            <DialogDescription>
+              当前会优先尝试 LinkedIn Easy Apply。邮箱投递会在这个弹窗里直接展开邮件发送辅助区，不会跳到新页面。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>职位</Label>
+              <div className="rounded-md border px-3 py-2 text-sm">
+                {selectedJob?.title} · {selectedJob?.company}
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="resume-path">PDF 简历路径</Label>
+              <Input
+                id="resume-path"
+                placeholder="/tmp/resume.pdf"
+                value={resumePathInput}
+                onChange={(event) => setResumePathInput(event.target.value)}
+              />
+            </div>
+            {selectedJob?.url ? (
+              <p className="text-xs text-muted-foreground break-all">
+                职位链接：{selectedJob.url}
+              </p>
+            ) : null}
+            {applyMessage ? (
+              <p className="text-sm text-muted-foreground">{applyMessage}</p>
+            ) : null}
+            {emailAssist ? (
+              <div ref={emailAssistRef} className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-3">
+                <div>
+                  <p className="font-medium">邮件申请辅助</p>
+                  <p className="text-sm text-muted-foreground">已识别为邮箱投递，你可以直接复制内容、打开邮件客户端，或通过 Resend 发送。</p>
+                </div>
+                {emailAssist.apply_email ? (
+                  <div className="space-y-1">
+                    <Label>收件邮箱</Label>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 rounded-md border px-3 py-2 text-sm break-all">
+                        {emailAssist.apply_email}
+                      </div>
+                      <Button variant="outline" size="sm" onClick={() => void handleCopy(emailAssist.apply_email)}>
+                        <Copy className="size-4 mr-2" />
+                        复制
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+                <div className="space-y-1">
+                  <Label>邮件主题</Label>
+                  <div className="flex items-center gap-2">
+                    <div className="flex-1 rounded-md border px-3 py-2 text-sm break-all">
+                      {emailAssist.subject}
+                    </div>
+                    <Button variant="outline" size="sm" onClick={() => void handleCopy(emailAssist.subject)}>
+                      <Copy className="size-4 mr-2" />
+                      复制
+                    </Button>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <Label>邮件正文</Label>
+                  <div className="rounded-md border px-3 py-2 text-sm whitespace-pre-wrap max-h-48 overflow-y-auto">
+                    {emailAssist.body}
+                  </div>
+                  <Button variant="outline" size="sm" onClick={() => void handleCopy(emailAssist.body)}>
+                    <Copy className="size-4 mr-2" />
+                    复制正文
+                  </Button>
+                </div>
+                <div className="space-y-1 text-xs text-muted-foreground">
+                  <p>简历附件：{emailAssist.resume_pdf || "未生成"}</p>
+                  {emailAssist.cover_letter ? <p>求职信附件：{emailAssist.cover_letter}</p> : null}
+                </div>
+                <div className="flex gap-2">
+                  <Button variant="outline" size="sm" asChild disabled={!mailtoHref}>
+                    <a href={mailtoHref || "#"}>
+                      <ExternalLink className="size-4 mr-2" />
+                      打开邮件客户端
+                    </a>
+                  </Button>
+                  <Button size="sm" onClick={() => void handleSendEmail()} disabled={isSendingEmail || !emailAssist.apply_email}>
+                    {isSendingEmail ? <Loader2 className="size-4 mr-2 animate-spin" /> : null}
+                    通过 Resend 发送
+                  </Button>
+                </div>
+                {sendEmailMessage ? (
+                  <p className="text-sm text-muted-foreground">{sendEmailMessage}</p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setApplyDialogOpen(false)}>
+              关闭
+            </Button>
+            <Button onClick={() => void handleApply()} disabled={isApplying || !selectedJob}>
+              {isApplying ? (
+                <>
+                  <Loader2 className="size-4 mr-2 animate-spin" />
+                  申请中...
+                </>
+              ) : (
+                "开始自动申请"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

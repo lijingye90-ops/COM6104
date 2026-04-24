@@ -53,7 +53,7 @@ class TestInitDB:
 
 class TestSeedDB:
     def test_seed_db_inserts_two_records(self, _tmp_db):
-        """seed_db should insert exactly 2 demo records."""
+        """seed_db is now a no-op kept only for backward compatibility."""
         from db import seed_db
 
         seed_db()
@@ -62,10 +62,10 @@ class TestSeedDB:
         rows = conn.execute("SELECT * FROM applications").fetchall()
         conn.close()
 
-        assert len(rows) == 2
+        assert len(rows) == 0
 
     def test_seed_db_is_idempotent(self, _tmp_db):
-        """Running seed_db twice still results in 2 records (INSERT OR IGNORE)."""
+        """Running seed_db twice should still be harmless."""
         from db import seed_db
 
         seed_db()
@@ -75,10 +75,10 @@ class TestSeedDB:
         rows = conn.execute("SELECT * FROM applications").fetchall()
         conn.close()
 
-        assert len(rows) == 2
+        assert len(rows) == 0
 
     def test_seed_db_expected_job_ids(self, _tmp_db):
-        """Seed records should have job_ids seed-001 and seed-002."""
+        """Legacy seed IDs are no longer inserted."""
         from db import seed_db
 
         seed_db()
@@ -90,8 +90,7 @@ class TestSeedDB:
         ]
         conn.close()
 
-        assert "seed-001" in ids
-        assert "seed-002" in ids
+        assert ids == []
 
 
 class TestTrackApplication:
@@ -218,26 +217,75 @@ class TestListApplications:
         """Each item in the list should be a dict with expected keys."""
         from db import track_application, list_applications
 
-        track_application(
-            job_id="list-001",
-            title="Dev A",
-            company="CoA",
-            url="https://a.com",
-        )
-        track_application(
-            job_id="list-002",
-            title="Dev B",
-            company="CoB",
-            url="https://b.com",
+
+class TestChatPersistence:
+    def test_chat_tables_created(self, _tmp_db):
+        from db import init_db
+
+        init_db()
+
+        conn = sqlite3.connect(_tmp_db)
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        conn.close()
+
+        assert {"conversations", "chat_messages", "memory_items"}.issubset(tables)
+
+    def test_save_and_list_chat_messages(self, _tmp_db):
+        from db import list_chat_messages, save_chat_message, upsert_conversation
+
+        upsert_conversation("conv-1", title="test")
+        save_chat_message("conv-1", role="user", content="hello", event_type="user")
+        save_chat_message("conv-1", role="assistant", content="hi", event_type="done", payload={"message": "hi"})
+
+        messages = list_chat_messages("conv-1")
+
+        assert len(messages) == 2
+        assert messages[0]["content"] == "hello"
+        assert messages[1]["data"]["message"] == "hi"
+
+    def test_memory_items_round_trip(self, _tmp_db):
+        from db import get_memory_items, set_memory_item
+
+        set_memory_item("last_resume_path", "/tmp/resume.pdf")
+
+        memory = get_memory_items()
+
+        assert memory["last_resume_path"] == "/tmp/resume.pdf"
+
+    def test_workflow_state_round_trip(self, _tmp_db):
+        from workflow_store import (
+            create_or_reset_workflow_state,
+            get_workflow_state,
+            init_workflow_store,
+            update_workflow_state,
         )
 
-        result = list_applications()
+        init_workflow_store()
+        create_or_reset_workflow_state("conv-wf-1", goal="python backend", input_resume_path="/tmp/resume.pdf")
+        update_workflow_state(
+            "conv-wf-1",
+            current_stage="match_done",
+            recommended_job={"job_id": "job-1", "title": "Backend Engineer"},
+        )
 
-        assert isinstance(result, list)
-        assert len(result) == 2
-        for item in result:
-            assert isinstance(item, dict)
-            assert "job_id" in item
+        state = get_workflow_state("conv-wf-1")
+
+        assert state is not None
+        assert state["goal"] == "python backend"
+        assert state["current_stage"] == "match_done"
+        assert state["recommended_job"]["job_id"] == "job-1"
+
+    def test_workflow_state_rejects_backward_transition(self, _tmp_db):
+        from workflow_store import create_or_reset_workflow_state, update_workflow_state
+
+        create_or_reset_workflow_state("conv-wf-2", goal="python backend")
+        update_workflow_state("conv-wf-2", current_stage="materials_done")
+
+        with pytest.raises(ValueError):
+            update_workflow_state("conv-wf-2", current_stage="search_done")
 
     def test_list_applications_ordered_by_created_at_desc(self, _tmp_db):
         """Most recently created application should appear first."""
